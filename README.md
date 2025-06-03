@@ -30,6 +30,12 @@ This agent consists of two separate scripts:
 - Sends results to the central monitoring API
 - Runs every minute (via cron or as a service)
 
+- Requirements on the agent node:
+```
+apt install python3-pip dnsutils openssl -y
+pip3 install dnspython requests certifi
+```
+
 ## Workflow
 
 1. The update agent fetches the latest configuration and optionally updates `run_agent.py` if a new version is available.
