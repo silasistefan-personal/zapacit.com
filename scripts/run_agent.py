@@ -1,154 +1,265 @@
-#!/usr/bin/env python3
+import os
 import json
+import time
 import socket
 import ssl
-import time
+import http.client
 import requests
+import fcntl
 import dns.resolver
 import dns.name
-import dns.message
 import dns.query
-import fcntl
-import os
-import sys
+import dns.message
+import subprocess
 from datetime import datetime
 from urllib.parse import urlparse
 
-CHECKS_FILE = "/etc/zapacit-agent/checks.json"
-API_URL = "https://www.zapacit.com/api/index.php"
-LOCK_FILE = '/tmp/run_agent.lock'
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
+FAILED_METRICS_FILE = "failed_metrics.json"
 
-try:
-    lock_file = open(LOCK_FILE, 'w')
-    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except IOError:
-    print("Another instance of agent_run.py is already running.")
-    sys.exit(1)
 
-def load_checks():
-    with open(CHECKS_FILE, "r") as f:
-        data = json.load(f)
-    return data["agent_token"], data["checks"]
-
-def get_ns(domain):
-    try:
-        answers = dns.resolver.resolve(domain, 'NS')
-        return str(answers[0])
-    except Exception:
+def load_config():
+    if not os.path.exists(CONFIG_FILE):
+        print("[ERROR] config.json not found.")
         return None
+    with open(CONFIG_FILE, "r") as f:
+        return json.load(f)
 
-def get_ns_ip(ns_domain):
+
+def resolve_dns_ns(hostname: str) -> float:
+    # Extract the base domain (e.g., google.com)
+    domain_parts = hostname.split('.')
+    if len(domain_parts) < 2:
+        raise ValueError("Invalid hostname")
+
+    base_domain = '.'.join(domain_parts[-2:])
+
+    # Step 1: Get NS records for the base domain
     try:
-        answers = dns.resolver.resolve(ns_domain, 'A')
-        return str(answers[0])
-    except Exception:
-        return None
+        ns_response = dns.resolver.resolve(base_domain, 'NS')
+        ns_servers = [str(rdata.target).rstrip('.') for rdata in ns_response]
+    except Exception as e:
+        raise RuntimeError(f"Failed to resolve NS for domain {base_domain}: {e}")
 
-def time_dns_ns(domain):
+    if not ns_servers:
+        raise RuntimeError(f"No NS records found for domain {base_domain}")
+
+    # Step 2: Resolve the IP of one of the authoritative nameservers
     try:
-        ns = get_ns(domain)
-        if not ns:
-            return None
-        ns_ip = get_ns_ip(ns)
-        if not ns_ip:
-            return None
-        start = time.time()
-        qname = dns.name.from_text(domain)
-        query = dns.message.make_query(qname, dns.rdatatype.A)
-        dns.query.udp(query, ns_ip, timeout=3)
-        return int((time.time() - start) * 1000)
-    except Exception:
-        return None
+        ns_ip_response = dns.resolver.resolve(ns_servers[0], 'A')
+        ns_ip = ns_ip_response[0].to_text()
+    except Exception as e:
+        raise RuntimeError(f"Failed to resolve IP for NS {ns_servers[0]}: {e}")
 
-def time_dns_local(domain):
+    # Step 3: Create and send a DNS query directly to the authoritative NS
     try:
-        start = time.time()
-        dns.resolver.resolve(domain, 'A')
-        return int((time.time() - start) * 1000)
-    except Exception:
-        return None
+        query = dns.message.make_query(hostname, 'A')
+        start = time.perf_counter()
+        response = dns.query.udp(query, ns_ip, timeout=5)
+        end = time.perf_counter()
+    except Exception as e:
+        raise RuntimeError(f"DNS query to authoritative NS failed: {e}")
 
-def time_tcp_handshake(host, port):
+    # Return the time taken in milliseconds
+    return (end - start) * 1000
+
+
+def resolve_dns_local(hostname):
     try:
         start = time.time()
-        sock = socket.create_connection((host, port), timeout=3)
-        sock.close()
-        return int((time.time() - start) * 1000)
-    except Exception:
+        socket.gethostbyname(hostname)
+        end = time.time()
+        return int((end - start) * 1000)
+    except Exception as e:
+        print(f"[WARN] DNS local resolution failed for {hostname}: {e}")
         return None
 
-def time_ssl_handshake(host, port=443):
+
+def tcp_handshake_time(host, port):
     try:
         start = time.time()
+        s = socket.create_connection((host, port), timeout=5)
+        end = time.time()
+        s.close()
+        return int((end - start) * 1000)
+    except Exception as e:
+        print(f"[WARN] TCP connection failed: {e}")
+        return None
+
+
+def ssl_handshake_time(host, port):
+    try:
         context = ssl.create_default_context()
-        with socket.create_connection((host, port), timeout=3) as sock:
+        start = time.time()
+        with socket.create_connection((host, port), timeout=5) as sock:
             with context.wrap_socket(sock, server_hostname=host) as ssock:
                 end = time.time()
-                cert = ssock.getpeercert()
-                not_after = datetime.strptime(cert['notAfter'], "%b %d %H:%M:%S %Y %Z")
-                days_remaining = (not_after - datetime.utcnow()).days
-        return int((end - start) * 1000), days_remaining
-    except Exception:
-        return None, None
-
-def time_http_get(url):
-    try:
-        start = time.time()
-        requests.get(url, timeout=5)
-        return int((time.time() - start) * 1000)
-    except Exception:
+        return int((end - start) * 1000)
+    except Exception as e:
+        print(f"[WARN] SSL handshake failed: {e}")
         return None
 
-def run_checks():
-    token, checks = load_checks()
-    for check in checks:
-        url = check["url"]
+
+def ssl_days_remaining(host, port):
+    try:
+        context = ssl.create_default_context()
+        with socket.create_connection((host, port), timeout=5) as sock:
+            with context.wrap_socket(sock, server_hostname=host) as ssock:
+                cert = ssock.getpeercert()
+                expire_date = datetime.strptime(cert['notAfter'], "%b %d %H:%M:%S %Y %Z")
+                remaining = (expire_date - datetime.utcnow()).days
+                return remaining
+    except Exception as e:
+        print(f"[WARN] SSL cert check failed: {e}")
+        return None
+
+
+def http_get_time(url):
+    try:
         parsed = urlparse(url)
-        domain = parsed.hostname
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        conn_class = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+        start = time.time()
+        conn = conn_class(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), timeout=5)
+        conn.request("GET", "/")
+        response = conn.getresponse()
+        end = time.time()
+        conn.close()
+        return int((end - start) * 1000)
+    except Exception as e:
+        print(f"[WARN] HTTP GET failed: {e}")
+        return None
 
-        print(f"Running checks for: {url}")
-        metrics = []
 
-        val = time_dns_ns(domain)
-        if val is not None:
-            metrics.append({"name": "dns_ns_time", "value": val})
+def run_check(url):
+    if not isinstance(url, str):
+        raise ValueError(f"Expected URL string, got {type(url)}")
 
-        val = time_dns_local(domain)
-        if val is not None:
-            metrics.append({"name": "dns_local_time", "value": val})
+    parsed = urlparse(url)
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
 
-        val = time_tcp_handshake(domain, port)
-        if val is not None:
-            metrics.append({"name": "tcp_time", "value": val})
+    metrics = []
 
-        if parsed.scheme == "https":
-            ssl_time, days_remaining = time_ssl_handshake(domain, port)
-            if ssl_time is not None:
-                metrics.append({"name": "ssl_time", "value": ssl_time})
-            if days_remaining is not None:
-                metrics.append({"name": "ssl_days_remaining", "value": days_remaining})
+    ns_time = resolve_dns_ns(host)
+    if ns_time is not None:
+        metrics.append({"name": "dns_ns_time", "value": ns_time})
 
-        val = time_http_get(url)
-        if val is not None:
-            metrics.append({"name": "http_time", "value": val})
+    local_time = resolve_dns_local(host)
+    if local_time is not None:
+        metrics.append({"name": "dns_local_time", "value": local_time})
 
-        payload = {
-            "token": token,
-            "url": url,
-            "metrics": metrics
-        }
+    tcp_time = tcp_handshake_time(host, port)
+    if tcp_time is not None:
+        metrics.append({"name": "tcp_time", "value": tcp_time})
 
-        # print(payload)
+    ssl_time = ssl_handshake_time(host, port)
+    if ssl_time is not None:
+        metrics.append({"name": "ssl_time", "value": ssl_time})
 
+    ssl_days = ssl_days_remaining(host, port)
+    if ssl_days is not None:
+        metrics.append({"name": "ssl_days_remaining", "value": ssl_days})
+
+    http_time = http_get_time(url)
+    if http_time is not None:
+        metrics.append({"name": "http_time", "value": http_time})
+
+    return metrics
+
+
+def post_metrics(api_url, token, url, metrics):
+    payload = {"token": token, "url": url, "metrics": metrics}
+    for attempt in range(3):
         try:
-            response = requests.post(API_URL, json=payload, timeout=10)
+            response = requests.post(api_url, json=payload, timeout=10)
             if response.status_code == 200:
-                print(f"[{url}] Data posted successfully.")
+                return True
             else:
-                print(f"[{url}] API error {response.status_code}: {response.text}")
+                print(f"[WARN] API error: {response.status_code} - {response.text}")
         except Exception as e:
-            print(f"[{url}] Failed to post data: {e}")
+            print(f"[WARN] Post attempt {attempt + 1} failed: {e}")
+        time.sleep(1)
+    return False
+
+
+def retry_failed_posts(api_url, token):
+    if not os.path.exists(FAILED_METRICS_FILE):
+        return
+
+    try:
+        with open(FAILED_METRICS_FILE, "r") as f:
+            failed_data = json.load(f)
+    except Exception as e:
+        print(f"[ERROR] Failed to read {FAILED_METRICS_FILE}: {e}")
+        return
+
+    new_failed = []
+    for item in failed_data:
+        url = item["url"]
+        metrics = item["metrics"]
+        if not post_metrics(api_url, token, url, metrics):
+            new_failed.append(item)
+
+    if new_failed:
+        with open(FAILED_METRICS_FILE, "w") as f:
+            json.dump(new_failed, f)
+    else:
+        os.remove(FAILED_METRICS_FILE)
+
+
+def save_failed(url, metrics):
+    try:
+        if os.path.exists(FAILED_METRICS_FILE):
+            with open(FAILED_METRICS_FILE, "r") as f:
+                existing = json.load(f)
+        else:
+            existing = []
+        existing.append({"url": url, "metrics": metrics})
+        with open(FAILED_METRICS_FILE, "w") as f:
+            json.dump(existing, f, indent=2)
+    except Exception as e:
+        print(f"[ERROR] Failed to write failed metrics: {e}")
+
+
+def main():
+    config = load_config()
+    if not config:
+        return
+
+    token = config.get("token")
+    api_url = config.get("api_url")
+    checks = config.get("checks", [])
+    lock_path = config.get("lock_file", "/tmp/run_agent.lock")
+
+    if not token or not api_url:
+        print("[ERROR] Missing token or api_url in config.")
+        return
+
+    try:
+        with open(lock_path, "w") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            retry_failed_posts(api_url, token)
+
+            for check in checks:
+                url = check.get("url")
+                if not url or not check.get("enabled", True):
+                    continue
+                print(f"[INFO] Checking {url}")
+                try:
+                    metrics = run_check(url)
+                    if metrics:
+                        if not post_metrics(api_url, token, url, metrics):
+                            save_failed(url, metrics)
+                    else:
+                        print(f"[WARN] No metrics generated for {url}")
+                except Exception as e:
+                    print(f"[ERROR] Failed check for {url}: {e}")
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+    except BlockingIOError:
+        print("[INFO] Another instance is running. Exiting.")
+    except Exception as e:
+        print(f"[ERROR] Unexpected error: {e}")
+
 
 if __name__ == "__main__":
-    run_checks()
+    main()
