@@ -40,7 +40,7 @@ def is_new_version(remote_url, local_path):
 
 def update_scripts(config):
     repo = config.get("github_repo")
-    files = config.get("script_to_update", [])
+    files = config.get("files_to_update", [])
     if not repo.endswith("/"):
         repo += "/"
 
