@@ -45,7 +45,7 @@ def update_scripts(config):
         repo += "/"
 
     for script in files:
-        raw_url = repo.replace("github.com", "raw.githubusercontent.com").replace("/tree/", "/") + "/main/scripts/" + script
+        raw_url = repo.replace("github.com", "raw.githubusercontent.com").replace("/tree/", "/") + script
         if is_new_version(raw_url, script):
             try:
                 response = requests.get(raw_url)
