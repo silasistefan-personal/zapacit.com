@@ -6,8 +6,8 @@ import psutil
 import requests
 from datetime import datetime
 
-CONFIG_FILE = "config.json"
-FAILED_POSTS_FILE = "local_agent_failed.json"
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
+FAILED_POSTS_FILE = os.path.join(os.path.dirname(__file__), "local_agent_failed.json")
 MAX_RETRIES = 3
 
 
