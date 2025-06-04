@@ -93,7 +93,7 @@ def main():
     if not config:
         return
 
-    lock_path = config.get("lock_file", os.path.join(SCRIPT_DIR, "update_agent.lock"))
+    lock_path = os.path.join(SCRIPT_DIR, "update_agent.lock")
     try:
         with open(lock_path, "w") as lock_file:
             fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
