@@ -5,8 +5,8 @@ import requests
 import fcntl
 import hashlib
 
-CONFIG_FILE = "config.json"
-
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
@@ -93,7 +93,7 @@ def main():
     if not config:
         return
 
-    lock_path = config.get("lock_file", "/tmp/update_agent.lock")
+    lock_path = config.get("lock_file", os.path.join(SCRIPT_DIR, "update_agent.lock"))
     try:
         with open(lock_path, "w") as lock_file:
             fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
