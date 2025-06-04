@@ -1,0 +1,22 @@
+{
+  "last_updated": "2025-06-03T22:51:39.538076Z",
+  "agent_token": "xxx",
+  "checks": [
+    {
+      "id": 11,
+      "url": "https://www.google.com"
+    },
+    {
+      "id": 12,
+      "url": "https://www.cloudflare.com"
+    },
+    {
+      "id": 13,
+      "url": "https://www.amazon.com"
+    },
+    {
+      "id": 14,
+      "url": "https://one.one.one.one"
+    }
+  ]
+}
