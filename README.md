@@ -32,7 +32,7 @@ This agent consists of two separate scripts:
 
 - Requirements on the agent node:
 ```
-apt install dnsutils openssl python3-requests python3-certifi python3-psutil -y
+apt install dnsutils openssl python3-requests python3-certifi python3-psutil python3-dnspython -y
 ```
 
 ## Workflow
