@@ -229,7 +229,7 @@ def main():
     token = config.get("token")
     api_url = config.get("api_url")
     checks = config.get("checks", [])
-    lock_path = os.path.join(os.path.dirname(__file__), config.get("lock_file", "/tmp/run_agent.lock"))
+    lock_path = os.path.join(os.path.dirname(__file__), "run_agent.lock")
     
     if not token or not api_url:
         print("[ERROR] Missing token or api_url in config.")
